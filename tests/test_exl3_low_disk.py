@@ -1,4 +1,6 @@
+import ast
 import ctypes
+import os
 import importlib
 import json
 from pathlib import Path
@@ -48,6 +50,42 @@ low_disk = importlib.import_module('exl3_test.conversion.low_disk')
 
 
 class LowDiskTest(unittest.TestCase):
+    def test_cleanup_after_compile(self):
+        source = (PACKAGE / 'conversion/convert_model.py').read_text()
+        tree = ast.parse(source)
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        index = next(i for i, node in enumerate(main.body)
+                     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                     and isinstance(node.value.func, ast.Name) and node.value.func.id == 'compile_model')
+        code = compile(ast.fix_missing_locations(ast.Module(body=main.body[index:index + 2], type_ignores=[])),
+                       'convert_model.py', 'exec')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / 'qtensors'
+            directory.mkdir()
+            save_file({}, str(directory / 'model.visual.pos_embed.safetensors'))
+            context = {'args': {'work_dir': temp, 'low_disk': True}, 'os': os, 'shutil': shutil,
+                       'model': None, 'config': None, 'tokenizer': None, 'mtp_model': None, 'vision_model': None}
+            def compile_ok(*args):
+                self.assertTrue(directory.is_dir())
+                self.assertEqual(load_file(str(directory / 'model.visual.pos_embed.safetensors')), {})
+            context['compile_model'] = compile_ok
+            exec(code, context)
+            self.assertFalse(directory.exists())
+            directory.mkdir()
+            (directory / 'keep').write_text('keep')
+            context['args']['low_disk'] = False
+            context['compile_model'] = lambda *args: None
+            exec(code, context)
+            self.assertTrue((directory / 'keep').exists())
+            context['args']['low_disk'] = True
+            def compile_fails(*args):
+                raise RuntimeError('compile failed')
+            context['compile_model'] = compile_fails
+            with self.assertRaisesRegex(RuntimeError, 'compile failed'):
+                exec(code, context)
+            self.assertTrue((directory / 'keep').exists())
+
     def test_fetch_and_release_preserves_preexisting(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

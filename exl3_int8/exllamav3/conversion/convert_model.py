@@ -1641,7 +1641,7 @@ def main(args, job_state):
     # Compile model
     compile_model(args, model, config, tokenizer, mtp_model, vision_model)
     if args.get("low_disk"):
-        os.rmdir(os.path.join(args["work_dir"], "qtensors"))
+        shutil.rmtree(os.path.join(args["work_dir"], "qtensors"), ignore_errors=True)
     if manager:
         manager.release(len(all_modules), config.stc)
 
