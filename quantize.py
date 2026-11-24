@@ -154,6 +154,7 @@ def main():
         d.add_argument('--' + name, type=Path, required=True)
     d.add_argument('--seed', type=int, default=52)
     d.add_argument('--device', choices=('cuda', 'cpu'), default='cuda')
+    d.add_argument('--gpu-linear-gib', type=float, help='GPU に常駐させる主幹の線形重みの上限（GiB）')
     v = sub.add_parser('validate', help='bundle を検証')
     v.add_argument('bundle', type=Path)
     args = p.parse_args()

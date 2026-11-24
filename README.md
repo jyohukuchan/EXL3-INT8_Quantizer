@@ -37,7 +37,7 @@ Qwen3.5 系の dense モデルでは、量子化後に `suh`、`svh` とテキ�
 python quantize.py distill --model /path/to/bf16 --bundle /path/to/quantized --output /path/to/distilled --seed 52
 ```
 
-校正は同梱のテキストから 16 行 × 128 トークンを取り、温度 1 の KL ダイバージェンスで 32 ステップ学習します。既定の `--device cuda` では BF16 モデルと学習用の一時領域が GPU に収まる必要があります。`distill_report.json` に条件と損失を記録します。
+校正は同梱のテキストから 16 行 × 128 トークンを取り、温度 1 の KL ダイバージェンスで 32 ステップ学習します。既定では BF16 モデル全体を GPU に配置します。`--gpu-linear-gib 6` を加えると主幹の線形重みを最大 6 GiB まで GPU に常駐させ、残りをホスト RAM から投影ごとに転送します。埋め込み、出力層、活性と一時領域の VRAM は別途必要です。`distill_report.json` に条件と損失を記録します。
 
 ## Google Colab
 

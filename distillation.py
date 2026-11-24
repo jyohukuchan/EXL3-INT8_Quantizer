@@ -1,11 +1,13 @@
 import importlib.util
 import json
+import math
 import shutil
 import tempfile
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from safetensors import safe_open
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 
@@ -37,16 +39,66 @@ def hadamard128(tensor):
     return blocks.reshape(tensor.shape) * (128 ** -0.5)
 
 
+def frozen_linear(x, weight, bias=None):
+    if weight.device == x.device:
+        return F.linear(x, weight, bias)
+
+    def compute(value):
+        return F.linear(value, weight.to(value.device), bias)
+
+    if torch.is_grad_enabled() and x.requires_grad:
+        return checkpoint(compute, x, use_reentrant=False, preserve_rng_state=False)
+    return compute(x)
+
+
+class StreamedLinear(torch.nn.Linear):
+    def forward(self, x):
+        return frozen_linear(x, self.weight, self.bias)
+
+
+@torch.no_grad()
+def place_model(model, device, gpu_linear_gib):
+    if gpu_linear_gib is None:
+        return model.to(device)
+    model.requires_grad_(False)
+    budget = int(gpu_linear_gib * 2**30)
+    resident = 0
+    cpu_bytes = 0
+    for name, module in list(model.named_modules()):
+        if name.startswith('model.visual'):
+            continue
+        stream = False
+        for key, parameter in module.named_parameters(recurse=False):
+            if isinstance(module, torch.nn.Linear) and key == 'weight' and name.startswith(
+                    'model.language_model.layers.'):
+                size = parameter.numel() * parameter.element_size()
+                if resident + size > budget:
+                    cpu_bytes += size
+                    stream = True
+                    continue
+                resident += size
+            parameter.data = parameter.to(device)
+        for key, buffer in module.named_buffers(recurse=False):
+            setattr(module, key, buffer.to(device))
+        if stream:
+            proxy = StreamedLinear(module.in_features, module.out_features, bias=module.bias is not None, device='meta')
+            proxy.weight = module.weight
+            proxy.bias = module.bias
+            model.set_submodule(name, proxy)
+    print(dict(resident_linear_bytes=resident, streamed_linear_bytes=cpu_bytes), flush=True)
+    return model
+
+
 class ScaledLinear(torch.nn.Module):
-    def __init__(self, layer):
+    def __init__(self, layer, device):
         super().__init__()
         self.layer = layer
-        self.su = torch.nn.Parameter(torch.ones(layer.in_features, device=layer.weight.device))
-        self.sv = torch.nn.Parameter(torch.ones(layer.out_features, device=layer.weight.device))
+        self.su = torch.nn.Parameter(torch.ones(layer.in_features, device=device))
+        self.sv = torch.nn.Parameter(torch.ones(layer.out_features, device=device))
 
     def forward(self, x):
         scaled = (x.float() * self.su).to(x.dtype)
-        y = F.linear(scaled, self.layer.weight)
+        y = frozen_linear(scaled, self.layer.weight)
         y = (y.float() * self.sv).to(y.dtype)
         return y if self.layer.bias is None else y + self.layer.bias
 
@@ -70,7 +122,7 @@ def install_student(model, tensors):
         if name == 'lm_head' and layer.weight is model.get_input_embeddings().weight:
             layer.weight = torch.nn.Parameter(layer.weight.detach().clone(), requires_grad=False)
         packed = read_weight(tensors, name + '.trellis').numpy()
-        device = layer.weight.device
+        device = model.get_input_embeddings().weight.device
         su = read_weight(tensors, name + '.suh').to(device).flatten()
         sv = read_weight(tensors, name + '.svh').to(device).flatten()
         if tuple(layer.weight.shape) != (packed.shape[1] * 16, packed.shape[0] * 16):
@@ -87,7 +139,7 @@ def install_student(model, tensors):
     model.requires_grad_(False)
     scaled = {}
     for name in roots:
-        scaled[name] = ScaledLinear(model.get_submodule(name))
+        scaled[name] = ScaledLinear(model.get_submodule(name), model.get_input_embeddings().weight.device)
         model.set_submodule(name, scaled[name])
     norms = {name: model.get_parameter(name).requires_grad_(True) for name in tensors
              if name.startswith('model.language_model.') and name.endswith('norm.weight')}
@@ -144,6 +196,9 @@ def distill(args):
     output = args.output.resolve()
     if output.exists() or output.is_relative_to(bundle) or output.is_relative_to(source):
         raise ValueError('出力先には入力ディレクトリ外の新しいパスを指定してください')
+    if args.gpu_linear_gib is not None and (args.device != 'cuda' or not math.isfinite(args.gpu_linear_gib)
+                                             or args.gpu_linear_gib < 0):
+        raise ValueError('gpu-linear-gib には GPU 実行時に有限の非負数を指定してください')
     validate(bundle)
     config = json.loads((source / 'config.json').read_text())
     if config.get('model_type') != 'qwen3_5' or config.get('text_config', {}).get('num_experts', 0):
@@ -157,13 +212,15 @@ def distill(args):
     tokenizer = AutoTokenizer.from_pretrained(source)
     inputs = calibration_inputs(tokenizer, args.seed, args.device)
     model = AutoModelForImageTextToText.from_pretrained(
-        source, dtype=torch.bfloat16, attn_implementation='eager').eval().to(args.device)
+        source, dtype=torch.bfloat16, attn_implementation='eager').eval()
+    model = place_model(model, args.device, args.gpu_linear_gib)
     with torch.no_grad():
         teacher = [model(input_ids=x, use_cache=False).logits[0].cpu() for x in inputs]
     scaled, norms = install_student(model, tensors)
     losses = train_scales(model, inputs, teacher)
     report = dict(model=str(source), bundle=str(bundle), seed=args.seed, steps=len(losses),
                   rows=len(inputs), columns=128, learning_rate=0.0002, loss=losses,
-                  linears=len(scaled), norms=len(norms), device=args.device, torch=torch.__version__)
+                  linears=len(scaled), norms=len(norms), device=args.device, gpu_linear_gib=args.gpu_linear_gib,
+                  torch=torch.__version__)
     output.parent.mkdir(parents=True, exist_ok=True)
     write_student(bundle, output, tensors, scaled, norms, report)
