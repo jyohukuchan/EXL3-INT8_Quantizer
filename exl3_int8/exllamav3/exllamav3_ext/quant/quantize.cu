@@ -85,6 +85,7 @@ static const half2* quantize_codebook(int device, int cb, const at::Tensor& inpu
 
 bool quantize_tiles_use_optimized(int major, int minor, int K, int cb)
 {
+    if (major < 8) return false;
     if (const char* env = std::getenv("EXL3_QT_OPTIMIZED"))
         return env[0] == '1';
     if (major == 12) return true;
@@ -109,7 +110,7 @@ static QtLaunch qt_launch(int device, int K, int cb, int L)
     const auto* props = at::cuda::getDeviceProperties(device);
     const bool optimized = quantize_tiles_use_optimized(props->major, props->minor, K, cb);
     const int edges = 65536 >> K;
-    const int cost_arrays = optimized && K == 1 ? 1 : (K >= 2 ? 2 : 0);
+    const int cost_arrays = props->major < 8 ? 0 : optimized && K == 1 ? 1 : (K >= 2 ? 2 : 0);
     const int shmem = cost_arrays * edges * sizeof(half) + L * sizeof(half) + 64 + 128;
     const auto& instances = optimized ? quantize_tiles_optimized_instances : quantize_tiles_kernel_instances;
     const auto& instances_l160 = optimized ? quantize_tiles_optimized_instances_l160 : quantize_tiles_kernel_instances_l160;

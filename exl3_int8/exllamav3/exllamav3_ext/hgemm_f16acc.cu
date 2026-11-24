@@ -56,6 +56,7 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p)
 {
     return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool pred)
 {
     int src_size = pred ? 16 : 0;
@@ -86,6 +87,8 @@ __device__ __forceinline__ void mma_f32(float* c, const uint32_t* a, const uint3
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+#endif
+
 template <bool OUT_F32, int TILE_N = 128, bool TUNED = false>
 __global__ void __launch_bounds__((Config<TILE_N, TUNED>::THREADS), 1)
 gemm_kernel
@@ -95,6 +98,7 @@ gemm_kernel
     long long strideA, long long strideB, long long strideC
 )
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     using CF = Config<TILE_N, TUNED>;
     constexpr int BM = CF::BM, BN = CF::BN, BK = CF::BK, THREADS = CF::THREADS;
     constexpr int STAGES = CF::STAGES, GROUP_M = CF::GROUP_M;
@@ -290,11 +294,13 @@ gemm_kernel
                 }
             }
         }
+#endif
 }
 
 template <bool F16>
 __global__ void __launch_bounds__(256) rate_kernel(int iters, float* sink)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     uint32_t a0 = threadIdx.x, a1 = a0 + 1, a2 = a0 + 2, a3 = a0 + 3, b0 = a0 + 5, b1 = a0 + 7;
     uint32_t a[4] = { a0, a1, a2, a3 }, b[2] = { b0, b1 };
     uint32_t h[8][2] = {};
@@ -312,6 +318,7 @@ __global__ void __launch_bounds__(256) rate_kernel(int iters, float* sink)
     #pragma unroll
     for (int c = 0; c < 8; ++c) s += F16 ? __uint_as_float(h[c][0] ^ h[c][1]) : f[c][0] + f[c][3];
     if (s == 123.456f) sink[threadIdx.x] = s;
+#endif
 }
 
 static int g_enabled[MAX_DEVICES];

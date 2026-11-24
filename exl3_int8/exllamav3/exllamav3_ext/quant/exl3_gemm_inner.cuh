@@ -39,6 +39,7 @@ void exl3_gemm_kernel_inner
     int size_n_stride = 0     // full width of B and C when computing a column slice (0: = size_n)
 )
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     const int TILEBLOCKS_M = TILESIZE_M / 16;
     if (size_n_stride == 0) size_n_stride = size_n;
     // Column blocks of the full-width B row: slices index B relative to their own column offset,
@@ -993,4 +994,5 @@ void exl3_gemm_kernel_inner
             FSTAGE(0, 4);
         }
     }
+#endif
 }

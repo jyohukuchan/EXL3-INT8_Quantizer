@@ -16,6 +16,7 @@ __global__ __launch_bounds__(qt_optimized_threads(K, cb), 1) void quantize_tiles
     uint16_t* __restrict__ temp_edges_ptr, const half2* __restrict__ lut,
     const float s0 = 0.0f)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     static_assert(K >= 1 && K <= 8 && L % 2 == 0);
     constexpr int NT = qt_optimized_threads(K, cb);
     constexpr int NW = NT / 32;
@@ -540,4 +541,5 @@ __global__ __launch_bounds__(qt_optimized_threads(K, cb), 1) void quantize_tiles
         };
         solve(forward);
     }
+#endif
 }

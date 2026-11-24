@@ -14,6 +14,10 @@ namespace cg = cooperative_groups;
 #include "exl3_gemv.cuh"
 #include "exl3_gemv_int8.cuh"
 #include "coop_autotune.cuh"
+#include "reconstruct.cuh"
+#include "hadamard.cuh"
+#include "turing_fallback.cuh"
+#include <ATen/Functions.h>
 #include <set>
 #include <vector>
 
@@ -149,6 +153,24 @@ int exl3_gemm_gr
     int size_n = B.size(1) * 16;
 
     TORCH_CHECK(!(mcg && mul1), "Specified both mcg and mul1")
+    if (cc == CC_OLD)
+    {
+        TORCH_CHECK(!graph, "exl3_gemm: graph capture is unavailable on devices below sm_80");
+        auto a = A.reshape({size_m, size_k});
+        auto c = C.reshape({size_m, size_n});
+        auto weight = at::empty({size_k, size_n}, A.options());
+        reconstruct(weight, B, K, mcg, mul1);
+        auto transformed = a;
+        if (suh)
+        {
+            transformed = A_had ? A_had.value().reshape({size_m, size_k}) : at::empty_like(a);
+            had_r_128(a, transformed, suh, c10::nullopt, 1.0f);
+        }
+        if (c_fp32) c.copy_(at::matmul(transformed.to(at::kFloat), weight.to(at::kFloat)));
+        else c.copy_(at::matmul(transformed, weight));
+        if (svh) had_r_128(c, c, c10::nullopt, svh, 1.0f);
+        return 0;
+    }
     int cb = 0;
     if (mcg) cb = 1;
     if (mul1) cb = 2;
@@ -428,6 +450,71 @@ int exl3_mgemm_gr
     int* locks = DevCtx::instance().get_locks(device);
 
     const half* A_ptr = (const half*) A.data_ptr();
+    if (cc == CC_OLD)
+    {
+        TORCH_CHECK(!graph, "exl3_mgemm: graph capture is unavailable on devices below sm_80");
+        auto bp = turing_host(B);
+        auto sp = turing_host(suh);
+        auto vp = turing_host(svh);
+        auto ids = indices ? turing_host(indices.value()).reshape({-1}) : at::Tensor();
+        auto ws = weights ? turing_host(weights.value()).to(at::kFloat).reshape({-1}) : at::Tensor();
+        auto widths = size_n_list ? turing_host(size_n_list.value()) : at::Tensor();
+        auto destinations = c_ptrs ? turing_host(c_ptrs.value()) : at::Tensor();
+        auto strides = n_stride_list ? turing_host(n_stride_list.value()) : at::Tensor();
+        auto sources = had_src_list ? turing_host(had_src_list.value()) : at::Tensor();
+        int total = MAX(bszm_in, bszm_out);
+        if (ids.defined()) total = MIN(total, (int) ids.numel());
+        std::vector<int> selected;
+        std::vector<float> factors;
+        for (int j = 0; j < total; ++j)
+        {
+            int id = ids.defined() ? (int) ids.data_ptr<int64_t>()[j] : j;
+            if (min_index >= 0)
+            {
+                bool active = id >= min_index && id < max_index;
+                if (!active && num_tokens == 1) continue;
+                id = active ? id - min_index : -1;
+            }
+            selected.push_back(id);
+            if (ws.defined()) factors.push_back(ws.data_ptr<float>()[j]);
+        }
+        TORCH_CHECK(num_tokens > 0 && (!ws.defined() || selected.size() % num_tokens == 0), "exl3_mgemm: invalid token count");
+        std::vector<at::Tensor> results;
+        for (int j = 0; j < (int) selected.size(); ++j)
+        {
+            int id = selected[j];
+            if (id < 0) { results.emplace_back(); continue; }
+            TORCH_CHECK(id < bp.numel() && id < vp.numel(), "exl3_mgemm: expert index out of range");
+            int src = sources.defined() ? sources.data_ptr<int>()[id] : id;
+            TORCH_CHECK(src >= 0 && src < sp.numel(), "exl3_mgemm: input scale index out of range");
+            int width = widths.defined() ? widths.data_ptr<int>()[id] : size_n;
+            int stride = strides.defined() ? strides.data_ptr<int>()[id] : width;
+            auto x = A.select(0, A.size(0) == 1 ? 0 : j);
+            auto had = A_had.reshape({-1, size_m, size_k}).select(0, sources.defined() ? src : j);
+            auto result = turing_linear(x, bp.data_ptr<int64_t>()[id], sp.data_ptr<int64_t>()[src],
+                                        vp.data_ptr<int64_t>()[id], K, mcg, mul1, width, stride, C.scalar_type(), &had);
+            if (ws.defined()) result.mul_(factors[j]);
+            if (destinations.defined())
+            {
+                auto dest = turing_view(destinations.data_ptr<int64_t>()[id], {size_m, stride}, C.options());
+                dest.narrow(1, 0, width).copy_(result);
+            }
+            else C.select(0, j).copy_(result);
+            results.push_back(result);
+        }
+        if (ws.defined())
+        {
+            int group = selected.size() / num_tokens;
+            for (int t = 0; t < num_tokens; ++t)
+            {
+                auto acc = at::zeros_like(C.select(0, t));
+                for (int j = t * group; j < (t + 1) * group; ++j)
+                    if (results[j].defined()) acc.add_(results[j]);
+                C.select(0, t).copy_(acc);
+            }
+        }
+        return 0;
+    }
     const uintptr_t* B_ptr_ptr = (const uintptr_t*) B.data_ptr();
     void* C_ptr = (void*) C.data_ptr();
     const half* A_had_ptr = (const half*) A_had.data_ptr();

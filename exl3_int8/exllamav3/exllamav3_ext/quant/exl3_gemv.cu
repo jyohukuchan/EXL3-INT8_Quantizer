@@ -92,6 +92,7 @@ bool exl3_gemv_try_launch
     int mode = force ? 2 : exl3_gemv_env_mode();
     if (mode == 0) return false;
     int cc = DevCtx::instance().get_cc(device);
+    if (cc == CC_OLD) return false;
 
     int mmode = size_m == 1 ? 0 : 1;
     int num_sms = DevCtx::instance().get_num_sms(device);
@@ -153,6 +154,14 @@ void exl3_gemv
     bool mul1
 )
 {
+    const at::cuda::OptionalCUDAGuard fallback_device_guard(A.device());
+    int fallback_device;
+    cuda_check(cudaGetDevice(&fallback_device));
+    if (DevCtx::instance().get_cc(fallback_device) == CC_OLD)
+    {
+        exl3_gemm(A, B, C, suh, A_had, svh, 0, mcg, mul1, 0);
+        return;
+    }
 #if EXL3_MUL1_MULT == 0xDCD12Du
     exl3_gemm(A, B, C, suh, A_had, svh, 0, mcg, mul1, 0);
     return;

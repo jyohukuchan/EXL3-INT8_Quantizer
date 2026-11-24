@@ -59,6 +59,7 @@ template<int t_bits, int MOE_TILESIZE_N, int cb, int M_TILE = MOE_TILESIZE_M>
 __global__ __launch_bounds__(EXL3_GEMM_BASE_THREADS * MOE_TILESIZE_K / 16)
 void exl3_moe_kernel(EXL3_MOE_KERNEL_ARGS)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     const int group_idx = blockIdx.z;
     const int block_idx = blockIdx.x;
     const int group_size = gridDim.x;  // SMs per expert, set at launch
@@ -299,4 +300,5 @@ void exl3_moe_kernel(EXL3_MOE_KERNEL_ARGS)
             retired_groups.store(0, cuda::memory_order_relaxed);
         }
     }
+#endif
 }

@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parent
 MULTIPLIER = 0x00DCD12D
 
 
-def verify_extension(backend):
+def verify_extension(backend=None):
+    if backend is None:
+        backend = resolve_backend(os.environ.get('EXL3_BACKEND', 'auto'))
     sys.path.insert(0, str(ROOT))
     if backend == 'triton':
         ext = importlib.import_module('exllamav3.ext')

@@ -9,6 +9,7 @@ template<EXL3_GEMM_T_ARGS>
 __global__ __launch_bounds__(EXL3_GEMM_BASE_THREADS * TILESIZE_K / 16)
 void exl3_gemm_kernel(EXL3_GEMM_ARGS)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     auto grid = cg::this_grid();
 
     // if (suh)
@@ -77,6 +78,7 @@ void exl3_gemm_kernel(EXL3_GEMM_ARGS)
         }
     }
      */
+#endif
 }
 
 #define MAX_INDICES 128
@@ -89,6 +91,7 @@ template<EXL3_GEMM_T_ARGS>
 __global__ __launch_bounds__(EXL3_GEMM_BASE_THREADS * TILESIZE_K / 16)
 void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     int bszm = MAX(bszm_in, bszm_out);
     auto grid = cg::this_grid();
 
@@ -340,4 +343,5 @@ void exl3_mgemm_kernel(EXL3_MGEMM_ARGS)
             }
         }
     }
+#endif
 }

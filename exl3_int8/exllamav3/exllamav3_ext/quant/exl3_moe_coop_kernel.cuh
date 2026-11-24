@@ -637,6 +637,7 @@ __device__ __forceinline__ void rotate_chunk(const MoeCoopParams& p, int row, co
 __global__ __launch_bounds__(THREADS)
 void exl3_moe_coop_rot_kernel(const MoeCoopParams p)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     __shared__ int16_t sh_order[MAX_SLOTS];
     __shared__ int16_t sh_local[MAX_SLOTS];
     __shared__ int sh_scan[WK];
@@ -666,6 +667,7 @@ void exl3_moe_coop_rot_kernel(const MoeCoopParams p)
     const half* suh = (const half*) (is_gate ? p.g_suh : p.u_suh)[si.local];
     half* dst = (is_gate ? p.had_g : p.had_u) + (size_t) s * p.Hi;
     rotate_chunk(p, si.row, suh, c, dst, lane);
+#endif
 }
 #else
 __global__ void exl3_moe_coop_rot_kernel(const MoeCoopParams p);
@@ -679,6 +681,7 @@ template <int bits, int cb, bool WIDE>
 __global__ __launch_bounds__(THREADS)
 void exl3_moe_coop_a_kernel(const MoeCoopParams p)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     constexpr int TCOLS = tile_cols<WIDE>();
     constexpr int GPC = tile_gpc<WIDE>();
     constexpr int CPB = tile_cpb<WIDE>();
@@ -804,6 +807,7 @@ void exl3_moe_coop_a_kernel(const MoeCoopParams p)
         }
         __syncthreads();
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -815,6 +819,7 @@ template <int bits, int cb, bool WIDE>
 __global__ __launch_bounds__(THREADS)
 void exl3_moe_coop_b_kernel(const MoeCoopParams p)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     constexpr int TCOLS = tile_cols<WIDE>();
     constexpr int GPC = tile_gpc<WIDE>();
     constexpr int CPB = tile_cpb<WIDE>();
@@ -958,6 +963,7 @@ void exl3_moe_coop_b_kernel(const MoeCoopParams p)
         }
         __syncthreads();
     }
+#endif
 }
 
 }  // namespace exl3_moe_coop_ns

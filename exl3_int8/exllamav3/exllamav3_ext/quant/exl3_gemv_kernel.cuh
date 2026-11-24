@@ -34,6 +34,7 @@ namespace exl3_gemv_ns {
 // mma.m16n8k16 with the A operand supplied as two FragB halves, fp16 accumulate
 __device__ __forceinline__ void mma_ab_h(const FragB& a01, const FragB& a23, const FragB& b, FragC_h& c)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     const uint32_t* a0 = reinterpret_cast<const uint32_t*>(&a01);
     const uint32_t* a1 = reinterpret_cast<const uint32_t*>(&a23);
     const uint32_t* bb = reinterpret_cast<const uint32_t*>(&b);
@@ -46,6 +47,7 @@ __device__ __forceinline__ void mma_ab_h(const FragB& a01, const FragB& a23, con
         :  "r"(a0[0]), "r"(a0[1]), "r"(a1[0]), "r"(a1[1]),
            "r"(bb[0]), "r"(bb[1])
     );
+#endif
 }
 
 // mul1 codebook pair decode via dp4a byte sum (bit-identical to the vabsdiff4 form)
@@ -139,6 +141,7 @@ template <int bits, bool c_fp32, int cb, int MMODE, int CFG, bool SMEM_STAGE>
 __global__ __launch_bounds__(CFG == 0 ? 512 : 256)
 void exl3_gemv_kernel(EXL3_GEMM_ARGS)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     static_assert(bits == 2 || bits == 3 || bits == 4, "exl3_gemv_kernel supports 2, 3 and 4 bpw");
     constexpr int WK   = CFG == 0 ? 16 : 8;     // k-split (warps per block)
     constexpr int WNT  = CFG == 0 ? 2 : 4;      // adjacent n-tiles per warp
@@ -399,4 +402,5 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                 );
         }
     }
+#endif
 }

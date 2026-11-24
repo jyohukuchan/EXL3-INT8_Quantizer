@@ -218,6 +218,7 @@ bool exl3_gemv_int8
 
     int device;
     cudaGetDevice(&device);
+    if (DevCtx::instance().get_cc(device) == CC_OLD) return false;
     if (K < 1 || K > exl3_gemv_int8_max_k(device)) return false;
     int num_sms = DevCtx::instance().get_num_sms(device);
     bool c_fp32 = C.dtype() == at::kFloat;

@@ -971,6 +971,7 @@ void exl3_gemv_int8_sq_kernel
     const half* __restrict__ svh
 )
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     extern __shared__ uint32_t shmem[];
 
     // Work decomposition: rows_per multiple of 8 (whole 128-spans for the local Hadamard); the host
@@ -1037,6 +1038,7 @@ void exl3_gemv_int8_sq_kernel
             if (t == 0) counters[nb256] = 0;
         }
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1058,6 +1060,7 @@ void exl3_gemv_int8_coop_kernel
     const half* __restrict__ svh
 )
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     auto grid = cg_gemv::this_grid();
     extern __shared__ uint32_t shmem[];
 
@@ -1220,4 +1223,5 @@ void exl3_gemv_int8_coop_kernel
 
         if (row + 1 < size_m) grid.sync();
     }
+#endif
 }

@@ -11,6 +11,7 @@
 #include "../util.cuh"
 #include "exl3_devctx.cuh"
 #include "exl3_moe_coop.cuh"
+#include "turing_fallback.cuh"
 #include "comp_units/exl3_moe_coop_instances.cuh"
 #define EXL3_MOE_COOP_DEFINE_ROT
 #include "exl3_moe_coop_kernel.cuh"
@@ -87,6 +88,82 @@ static void moe_coop_smem_optin(void* kernel, int smem)
 
 void exl3_moe_coop_launch(const MoeCoopParams& p_in, int K_gu, int K_d, int cb, int device, cudaStream_t stream)
 {
+    if (DevCtx::instance().get_cc(device) == CC_OLD)
+    {
+        auto p = p_in;
+        auto half_opts = at::TensorOptions().device(at::kCUDA, device).dtype(at::kHalf);
+        auto float_opts = half_opts.dtype(at::kFloat);
+        auto long_opts = half_opts.dtype(at::kLong);
+        auto table = [&](const int64_t* ptr) {
+            return ptr ? turing_host(turing_view((int64_t) ptr, {p.n_local}, long_opts)) : at::Tensor();
+        };
+        auto gt = table(p.g_trellis); auto gs = table(p.g_suh); auto gv = table(p.g_svh);
+        auto ut = table(p.u_trellis); auto us = table(p.u_suh); auto uv = table(p.u_svh);
+        auto dt = table(p.d_trellis); auto ds = table(p.d_suh); auto dv = table(p.d_svh);
+        auto gb = table(p.g_bias); auto ub = table(p.u_bias); auto db = table(p.d_bias);
+        auto sel = turing_host(turing_view((int64_t) p.sel, {p.bsz * p.topk}, long_opts));
+        auto rw = turing_host(turing_view((int64_t) p.rw, {p.bsz * p.topk}, half_opts)).to(at::kFloat);
+        auto x = turing_view((int64_t) p.x, {p.bsz, p.x_stride}, half_opts).narrow(1, 0, p.H);
+        auto out = turing_view((int64_t) p.out, {p.bsz, p.out_stride}, float_opts).narrow(1, 0, p.H_out);
+        out.zero_();
+        auto addr = [](const at::Tensor& t, int i) { return t.data_ptr<int64_t>()[i]; };
+        auto bias = [&](at::Tensor value, const at::Tensor& b, int i, int width) {
+            if (b.defined() && addr(b, i)) value = value + turing_view(addr(b, i), {width}, half_opts).to(value.scalar_type());
+            return value;
+        };
+        for (int row = 0; row < p.bsz; ++row)
+        {
+            auto padded = at::zeros({1, p.Hi}, half_opts);
+            padded.narrow(1, 0, p.H).copy_(x.narrow(0, row, 1));
+            for (int j = 0; j < p.topk; ++j)
+            {
+                int slot = row * p.topk + j;
+                int id = sel.data_ptr<int64_t>()[slot];
+                float factor = rw.data_ptr<float>()[slot];
+                if (!factor || (p.min_expert >= 0 && (id < p.min_expert || id >= p.max_expert))) continue;
+                if (p.min_expert >= 0) id -= p.min_expert;
+                TORCH_CHECK(id >= 0 && id < p.n_local, "exl3_moe_coop: expert index out of range");
+                auto up = turing_linear(padded, addr(ut, id), addr(us, id), addr(uv, id), K_gu, cb == 1, cb == 2,
+                                        p.I, p.I, p.gu_f32 ? at::kFloat : at::kHalf);
+                up = bias(up, ub, id, p.I).to(at::kFloat);
+                auto gate = up;
+                if (p.gated)
+                {
+                    gate = turing_linear(padded, addr(gt, id), addr(gs, id), addr(gv, id), K_gu, cb == 1, cb == 2,
+                                         p.I, p.I, p.gu_f32 ? at::kFloat : at::kHalf);
+                    gate = bias(gate, gb, id, p.I).to(at::kFloat);
+                }
+                at::Tensor activated;
+                if (p.act == MOE_COOP_ACT_SILU_OAI)
+                {
+                    if (p.act_limit) { gate = at::clamp_max(gate, p.act_limit); up = at::clamp(up, -p.act_limit, p.act_limit); }
+                    activated = (up + 1) * gate * at::sigmoid(gate * 1.702f);
+                }
+                else
+                {
+                    auto a = !p.gated ? at::relu(up) : p.act == MOE_COOP_ACT_SILU ? at::silu(gate) :
+                             p.act == MOE_COOP_ACT_GELU ? at::gelu(gate, "tanh") : at::relu(gate).square();
+                    if (p.act_limit) { a = at::clamp_max(a, p.act_limit); up = at::clamp(up, -p.act_limit, p.act_limit); }
+                    activated = a * up;
+                }
+                auto down = turing_linear(activated.to(at::kHalf), addr(dt, id), addr(ds, id), addr(dv, id),
+                                          K_d, cb == 1, cb == 2, p.Ho, p.Ho, at::kFloat);
+                down = bias(down, db, id, p.Ho);
+                out.narrow(0, row, 1).add_(down.narrow(1, 0, p.H_out), factor);
+            }
+        }
+        if (p.sh_out)
+        {
+            auto shared = turing_view((int64_t) p.sh_out, {p.bsz, p.H}, float_opts);
+            if (p.sh_gate_w)
+            {
+                auto gate = turing_view((int64_t) p.sh_gate_w, {p.H, 1}, half_opts);
+                shared = shared * at::sigmoid(at::matmul(x.to(at::kFloat), gate.to(at::kFloat)));
+            }
+            out.add_(shared);
+        }
+        return;
+    }
     MoeCoopParams p = p_in;
     { static int dbg = std::getenv("EXL3_MOE_COOP_DBG") ? atoi(std::getenv("EXL3_MOE_COOP_DBG")) : 0; p.dbg = dbg; }
     const int slots = p.bsz * p.topk;

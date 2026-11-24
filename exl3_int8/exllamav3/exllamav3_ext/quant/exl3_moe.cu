@@ -9,6 +9,7 @@ namespace cg = cooperative_groups;
 #include "../util.cuh"
 #include "comp_units/exl3_moe_instances.cuh"
 #include "exl3_devctx.cuh"
+#include "turing_fallback.cuh"
 #include <set>
 
 int exl3_moe_max_concurrency(int device)
@@ -107,6 +108,53 @@ void exl3_moe
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     if (num_active == 0) return;
+    int fallback_device;
+    cuda_check(cudaGetDevice(&fallback_device));
+    if (DevCtx::instance().get_cc(fallback_device) == CC_OLD)
+    {
+        TORCH_CHECK(act_function >= 0 && act_function <= 2, "exl3_moe: unknown activation");
+        TORCH_CHECK(!output_scratch || fused_base, "exl3_moe: output_scratch needs fused_base");
+        auto counts = turing_host(expert_count);
+        auto gt = turing_host(gate_ptrs_trellis); auto gs = turing_host(gate_ptrs_suh); auto gv = turing_host(gate_ptrs_svh);
+        auto ut = turing_host(up_ptrs_trellis); auto us = turing_host(up_ptrs_suh); auto uv = turing_host(up_ptrs_svh);
+        auto dt = turing_host(down_ptrs_trellis); auto ds = turing_host(down_ptrs_suh); auto dv = turing_host(down_ptrs_svh);
+        auto bases = fused_base ? turing_host(fused_base.value()) : at::Tensor();
+        int hidden = hidden_state.size(1);
+        int intermediate = temp_intermediate_u.size(2);
+        int64_t start = 0;
+        for (int expert = 0; expert < counts.numel() - 1; ++expert)
+        {
+            int64_t count = counts.data_ptr<int64_t>()[expert];
+            if (count && count >= count_lo && count <= count_hi && count <= temp_state_g.size(1))
+            {
+                auto tokens = token_sorted.narrow(0, start, count);
+                auto x = hidden_state.index_select(0, tokens);
+                auto up = turing_linear(x, ut.data_ptr<int64_t>()[expert], us.data_ptr<int64_t>()[expert], uv.data_ptr<int64_t>()[expert],
+                                        K_up, up_mcg, up_mul1, intermediate, intermediate, at::kHalf);
+                at::Tensor activated;
+                if (act_function == 2) activated = at::relu(up);
+                else
+                {
+                    auto gate = turing_linear(x, gt.data_ptr<int64_t>()[expert], gs.data_ptr<int64_t>()[expert], gv.data_ptr<int64_t>()[expert],
+                                              K_gate, gate_mcg, gate_mul1, intermediate, intermediate, at::kHalf);
+                    activated = act_function == 0 ? at::silu(gate) : at::gelu(gate, "tanh");
+                }
+                if (act_limit)
+                {
+                    activated = at::clamp_max(activated, act_limit);
+                    up = at::clamp(up, -act_limit, act_limit);
+                }
+                activated = (activated * up).to(at::kHalf);
+                auto result = turing_linear(activated, dt.data_ptr<int64_t>()[expert], ds.data_ptr<int64_t>()[expert], dv.data_ptr<int64_t>()[expert],
+                                            K_down, down_mcg, down_mul1, hidden, hidden, at::kFloat, nullptr, true);
+                result.mul_(weight_sorted.narrow(0, start, count).to(at::kFloat).unsqueeze(-1));
+                if (output_scratch) output_scratch.value().narrow(0, bases.data_ptr<int64_t>()[expert], count).copy_(result);
+                else output_state.index_add_(0, tokens, result);
+            }
+            start += count;
+        }
+        return;
+    }
     void* _output_scratch = nullptr;
     void* _fused_base = nullptr;
     if (output_scratch.has_value())

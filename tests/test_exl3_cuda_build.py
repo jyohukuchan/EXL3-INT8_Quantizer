@@ -5,6 +5,9 @@ from pathlib import Path
 import random
 import re
 import sys
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -58,6 +61,33 @@ class CudaBuildTest(unittest.TestCase):
             s = re.sub(r'#define\s+EXL3_MUL1_MULT\s+0x83DCD12Du', '', s)
             self.assertNotRegex(s, r'(?i)0x83dcd12d', str(p))
 
+    def test_quantize_optimized_device_selection(self):
+        compiler = shutil.which('c++')
+        if not compiler:
+            self.skipTest('C++ compiler is unavailable')
+        source = (EXT / 'quant/quantize.cu').read_text()
+        start = source.index('bool quantize_tiles_use_optimized(')
+        end = source.index('\nstruct QtLaunch', start)
+        program = '#include <cstdlib>\n' + source[start:end] + """
+int main() {
+    setenv("EXL3_QT_OPTIMIZED", "1", 1);
+    for (int k = 1; k <= 8; ++k)
+        for (int cb = 0; cb < 3; ++cb)
+            if (quantize_tiles_use_optimized(7, 5, k, cb)) return 1;
+    if (!quantize_tiles_use_optimized(8, 0, 1, 0)) return 2;
+    unsetenv("EXL3_QT_OPTIMIZED");
+    if (!quantize_tiles_use_optimized(8, 9, 1, 0)) return 3;
+    if (!quantize_tiles_use_optimized(12, 0, 3, 2)) return 4;
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'selector.cpp'
+            exe = Path(tmp) / 'selector'
+            src.write_text(program)
+            subprocess.run([compiler, str(src), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
     def test_tile_mapping(self):
         source = (EXT / 'quant/exl3_dq.cuh').read_text()
         for expression in ('8 * (lane >> 2) + 2 * (lane & 3)', 'base + 128', 'base + 64', 'base + 192'):
@@ -94,6 +124,38 @@ class CudaBuildTest(unittest.TestCase):
                         self.assertEqual(value, expected)
                         self.assertEqual(t, 8 * (col + 16 * (row // 8)) + row % 8)
             self.assertTrue(all(value is not None for row in matrix for value in row))
+
+    def test_verify_extension_default_backend(self):
+        mod = build_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'extension.so'
+            binary.write_bytes(b'extension')
+            native = mock.Mock(__file__=str(binary))
+            native.exl3_mul1_multiplier.return_value = mod.MULTIPLIER
+            triton = mock.Mock(__file__=str(binary))
+            triton.exllamav3_ext.exl3_mul1_multiplier.return_value = mod.MULTIPLIER
+            with mock.patch.object(mod, 'ROOT', root), \
+                 mock.patch.object(mod.importlib, 'import_module', side_effect=lambda name: triton if name == 'exllamav3.ext' else native) as load, \
+                 mock.patch.object(sys, 'path', list(sys.path)):
+                for env_backend, hip, cuda, expected in [
+                    (None, None, '13.0', 'exllamav3_ext'),
+                    ('auto', '7.0', None, 'exllamav3_ext'),
+                    ('triton', None, None, 'exllamav3.ext'),
+                    ('cuda', None, None, 'exllamav3_ext'),
+                ]:
+                    env = {} if env_backend is None else {'EXL3_BACKEND': env_backend}
+                    torch = mock.Mock(version=mock.Mock(hip=hip, cuda=cuda))
+                    with self.subTest(backend=env_backend), mock.patch.dict(os.environ, env, clear=True), \
+                         mock.patch.dict(sys.modules, {'torch': torch}):
+                        info = mod.verify_extension()
+                        self.assertEqual(info['multiplier'], mod.MULTIPLIER)
+                        self.assertEqual(info['path'], str(binary))
+                        load.assert_called_with(expected)
+                with mock.patch.dict(os.environ, {'EXL3_BACKEND': 'triton'}, clear=True), \
+                     mock.patch.dict(sys.modules, {'torch': mock.Mock()}):
+                    mod.verify_extension('cuda')
+                    load.assert_called_with('exllamav3_ext')
 
     def test_build_backend(self):
         mod = build_module()

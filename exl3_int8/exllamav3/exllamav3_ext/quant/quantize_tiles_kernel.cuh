@@ -86,7 +86,11 @@ void quantize_tiles_kernel
     int* sh_idx = (int*) sh; sh += 32 * sizeof(int);
 
     half* sh_temp_costs = (half*) sh;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    half* temp_costs = temp_costs_ptr + 2 * edges * tile_idx;
+#else
     half* temp_costs = K >= 2 ? sh_temp_costs : temp_costs_ptr + 2 * edges * tile_idx;
+#endif
     half* temp_costs_inc = temp_costs + edges;
 
     for (int i = thread; i < L; i += NT) sh_input_tile[i] = __float2half_rn(input_tile[i]);
