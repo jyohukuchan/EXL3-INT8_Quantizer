@@ -187,6 +187,7 @@ class Attention(Module):
         select_hq_bits: int = 0,
         qbits_key: str = "bits",
         qsa_indexer: Module | None = None,
+        post_rope_norm: bool = False,
     ):
         super().__init__(config, key, None)
 
@@ -211,6 +212,7 @@ class Attention(Module):
         self.use_k_as_v = use_k_as_v
         self.full_gate = full_gate
         self.gate_softplus = gate_softplus
+        self.post_rope_norm = post_rope_norm
         assert not gate_softplus or not (full_gate or interleaved_gate), \
             "Attn: gate_softplus is only implemented for the headwise gate"
         self.key_sinks = key_sinks
@@ -531,7 +533,7 @@ class Attention(Module):
             self.prealloc_qkv_carrier = g_tensor_cache.get(device, (mq.num_slices, 1, mq.width), torch.half, "qkvc_1")
 
         # Head norm
-        if self.q_norm and isinstance(self.q_norm, RMSNorm) and not self.q_norm.span_heads:
+        if self.q_norm and not self.post_rope_norm and isinstance(self.q_norm, RMSNorm) and not self.q_norm.span_heads:
             if self.q_norm.unweighted:
                 ones = torch.ones(self.head_dim, dtype = torch.half, device = device)
                 self.q_norm_tensor = ones
@@ -845,6 +847,47 @@ class Attention(Module):
         return q, k
 
 
+    def _apply_rope_and_qk_norm(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position: int,
+        positions: torch.Tensor | None,
+        position_ids: torch.Tensor | None,
+        inv_freq: torch.Tensor | None,
+        params: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.q_norm and not self.post_rope_norm:
+            if self.tp_span_heads_norm:
+                q, k = self.apply_qk_norms_tp(q, k, params)
+            elif not self.rope or self.q_norm_tensor is None:
+                q = self.q_norm.forward(q, params, out_dtype = torch.half)
+                k = self.k_norm.forward(k, params, out_dtype = torch.half)
+
+        if self.rope:
+            q, k = self.rope.apply(
+                q, k,
+                position,
+                positions,
+                position_ids,
+                True,
+                self.q_norm_tensor if not self.tp_span_heads_norm and not self.post_rope_norm else None,
+                self.k_norm_tensor if not self.tp_span_heads_norm and not self.post_rope_norm else None,
+                self.norm_eps,
+                self.norm_constant_bias,
+                inv_freq,
+            )
+
+        if self.q_norm and self.post_rope_norm:
+            if self.tp_span_heads_norm:
+                q, k = self.apply_qk_norms_tp(q, k, params)
+            else:
+                q = self.q_norm.forward(q, params, out_dtype = torch.half)
+                k = self.k_norm.forward(k, params, out_dtype = torch.half)
+
+        return q, k
+
+
     def decode_flash_attn_nc(
         self,
         x: torch.Tensor,
@@ -873,27 +916,9 @@ class Attention(Module):
 
         q, k, v, g = self.project_qkv(x, params)
 
-        if self.q_norm:
-            if self.tp_span_heads_norm:
-                # TP-aware path for span_heads=True
-                q, k = self.apply_qk_norms_tp(q, k, params)
-            elif not self.rope or self.q_norm_tensor is None:
-                q = self.q_norm.forward(q, params, out_dtype = torch.half)
-                k = self.k_norm.forward(k, params, out_dtype = torch.half)
-
-        if self.rope:
-            q, k = self.rope.apply(
-                q, k,
-                position,
-                positions,
-                position_ids,
-                True,
-                self.q_norm_tensor if not self.tp_span_heads_norm else None,
-                self.k_norm_tensor if not self.tp_span_heads_norm else None,
-                self.norm_eps,
-                self.norm_constant_bias,
-                inv_freq,
-            )
+        q, k = self._apply_rope_and_qk_norm(
+            q, k, position, positions, position_ids, inv_freq, params
+        )
 
         if simulate_kv_quant:
             # (k_bits, v_bits) or (k_bits, v_bits, compand_a)
@@ -1072,6 +1097,7 @@ class Attention(Module):
         # Graph-captured C++ path for the whole decode attention block (causality is baked
         # into the slot kernels, so non-causal callers like the DFlash draft graph too)
         if (
+            not self.post_rope_norm and
             _bc_attn_enable and non_causal_spans is None and
             bsz <= _bc_max_bsz and seqlen <= _bc_max_qlen and
             native_projection_rows_supported([self.q_proj,self.k_proj,self.v_proj,self.g_proj,self.o_proj],bsz*seqlen) and
@@ -1087,27 +1113,9 @@ class Attention(Module):
 
         q, k, v, g = self.project_qkv(x, params)
 
-        if self.q_norm:
-            if self.tp_span_heads_norm:
-                # TP-aware path for span_heads=True
-                q, k = self.apply_qk_norms_tp(q, k, params)
-            elif not self.rope or self.q_norm_tensor is None:
-                q = self.q_norm.forward(q, params, out_dtype = torch.half)
-                k = self.k_norm.forward(k, params, out_dtype = torch.half)
-
-        if self.rope:
-            q, k = self.rope.apply(
-                q, k,
-                position,
-                positions,
-                position_ids,
-                True,
-                self.q_norm_tensor if not self.tp_span_heads_norm else None,
-                self.k_norm_tensor if not self.tp_span_heads_norm else None,
-                self.norm_eps,
-                self.norm_constant_bias,
-                inv_freq,
-            )
+        q, k = self._apply_rope_and_qk_norm(
+            q, k, position, positions, position_ids, inv_freq, params
+        )
 
         if simulate_kv_quant:
             # (k_bits, v_bits) or (k_bits, v_bits, compand_a)
@@ -1240,6 +1248,7 @@ class Attention(Module):
                 "full_gate": self.full_gate,
                 "gate_softplus": self.gate_softplus,
                 "use_cu_seqlens": self.use_cu_seqlens,
+                "post_rope_norm": self.post_rope_norm,
             },
             "num_kv_heads": self.num_kv_heads,
             **{name: _export(getattr(self, name, None)) for name in (

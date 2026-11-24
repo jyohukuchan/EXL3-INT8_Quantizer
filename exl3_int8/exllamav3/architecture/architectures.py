@@ -24,6 +24,7 @@ from .glm_moe_dsa import GlmMoeDsaModel
 from .glm5_next import Glm5NextModel
 from .gpt_oss import GptOssModel
 from .hcxvisionv2 import HCXVisionV2Model
+from .hunyuan_v1_dense import HunYuanDenseV1Model
 from .hy_v3 import HyV3Model
 from .hyperclovax import HyperClovaxModel
 from .iquestcoder import IQuestCoderModel
@@ -94,6 +95,7 @@ ARCHITECTURES = {
         Glm5NextModel,
         GptOssModel,
         HCXVisionV2Model,
+        HunYuanDenseV1Model,
         HyV3Model,
         HyperClovaxModel,
         IQuestCoderModel,

@@ -186,6 +186,15 @@ class RoPE:
                 self._rope_params_yarn()
             case "longrope" | "su":
                 self._rope_params_longrope()
+            case "dynamic":
+                if rs.rope_scaling is not None and rs.rope_scaling.get("alpha"):
+                    self._rope_params_ntk_alpha()
+                elif rs.rope_scaling is None or float(rs.rope_scaling.get("factor", 1.0)) == 1.0:
+                    self._rope_params_default()
+                else:
+                    raise ValueError("Dynamic RoPE without alpha and factor != 1.0 is not supported")
+            case "ntk_alpha":
+                self._rope_params_ntk_alpha()
             case _:
                 raise ValueError(f"Unknown rope_type: {t}")
 
@@ -194,6 +203,15 @@ class RoPE:
         rs = self.rope_settings
         base = rs.rope_theta
         dim = rs.rotary_dim or int(rs.head_dim * rs.partial_rotary_factor)
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype = torch.int64, device = self.device).float() / dim))
+        self.inv_freq, self.attn_factor = inv_freq, 1.0
+
+
+    def _rope_params_ntk_alpha(self):
+        rs = self.rope_settings
+        dim = rs.rotary_dim or int(rs.head_dim * rs.partial_rotary_factor)
+        alpha = float(rs.rope_scaling["alpha"])
+        base = rs.rope_theta * (alpha ** (dim / (dim - 2)))
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype = torch.int64, device = self.device).float() / dim))
         self.inv_freq, self.attn_factor = inv_freq, 1.0
 
