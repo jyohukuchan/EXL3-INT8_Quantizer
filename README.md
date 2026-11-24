@@ -29,6 +29,16 @@ python quantize.py validate /path/to/output
 
 `--adapter` に PEFT LoRA のローカルディレクトリまたは Hugging Face リポジトリを指定すると、重みの読み込み時にマージします。リモートの revision は `--adapter-revision` で指定します。対応しない adapter 設定はエラーになります。
 
+## Qwen3.5 系の KL 蒸留
+
+Qwen3.5 系の dense モデルでは、量子化後に `suh`、`svh` とテキスト側の Norm を調整できます。量子化に使った BF16 モデルを教師に指定します。入力のトレリスとビット配分を保持し、結果を新しいディレクトリへ書き出します。
+
+```bash
+python quantize.py distill --model /path/to/bf16 --bundle /path/to/quantized --output /path/to/distilled --seed 52
+```
+
+校正は同梱のテキストから 16 行 × 128 トークンを取り、温度 1 の KL ダイバージェンスで 32 ステップ学習します。既定の `--device cuda` では BF16 モデルと学習用の一時領域が GPU に収まる必要があります。`distill_report.json` に条件と損失を記録します。
+
 ## Google Colab
 
 GPU ランタイムを選択し、以下をセルで実行します。モデル、作業領域、出力先には十分な空き容量を確保してください。非公開モデルでは Hugging Face の認証も必要です。

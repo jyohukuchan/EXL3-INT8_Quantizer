@@ -149,6 +149,11 @@ def main():
     c.add_argument('--checkpoint-dtype', choices=['fp32', 'bf16', 'fp16'])
     c.add_argument('--no-checkpoint', action='store_true')
     c.add_argument('--shard-size', type=int)
+    d = sub.add_parser('distill', help='Qwen3.5 系の量子化済みモデルのスケールと Norm を KL 蒸留')
+    for name in ('model', 'bundle', 'output'):
+        d.add_argument('--' + name, type=Path, required=True)
+    d.add_argument('--seed', type=int, default=52)
+    d.add_argument('--device', choices=('cuda', 'cpu'), default='cuda')
     v = sub.add_parser('validate', help='bundle を検証')
     v.add_argument('bundle', type=Path)
     args = p.parse_args()
@@ -162,6 +167,9 @@ def main():
             print(json.dumps(resolve_backend('cuda'), ensure_ascii=False))
         else:
             run(sys.executable, EXT / 'build_ext.py', '--backend', args.backend)
+    elif args.command == 'distill':
+        from distillation import distill
+        distill(args)
     elif args.command == 'validate':
         run(sys.executable, QUANT / 'validate_exl3.py', args.bundle)
     elif args.command == 'convert':
