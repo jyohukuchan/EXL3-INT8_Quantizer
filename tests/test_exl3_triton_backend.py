@@ -400,6 +400,32 @@ def test_exl3_gemm(scales):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_stloader_continues_partial_reads(tmp_path, monkeypatch):
+    import os
+
+    read = os.pread
+    readv = os.preadv
+
+    def partial(handle, size, offset):
+        return read(handle, min(size, 3), offset)
+
+    def partial_vector(handle, buffers, offset):
+        return readv(handle, [buffers[0][:3]], offset)
+
+    monkeypatch.setattr(os, 'pread', partial)
+    monkeypatch.setattr(os, 'preadv', partial_vector)
+    path = tmp_path / 'partial.bin'
+    path.write_bytes(bytes(range(24)))
+    handles = backend.stloader_open_file(str(path))
+    try:
+        target = torch.empty(12, dtype=torch.uint8)
+        backend.stloader_read(handles, 5, target.numel(), target)
+        assert target.tolist() == list(range(5, 17))
+        backend.stloader_read(handles, 24, 0, target)
+    finally:
+        backend.stloader_close_file(handles)
+
+
 def test_stloader_rejects_short_read():
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / 'short.bin'

@@ -64,10 +64,16 @@ def stloader_close_file(handles):
 def _read(handles, offset, size):
     if not handles or offset < 0 or size < 0:
         raise ValueError('ファイル読み込みの引数が不正です')
-    data = os.pread(handles[0], size, offset)
-    if len(data) != size:
-        raise EOFError('ファイルの読み込みが不足しています')
-    return bytearray(data)
+    data = bytearray(size)
+    view = memoryview(data)
+    position = 0
+    while position < size:
+        end = min(position + 64 * 1024**2, size)
+        count = os.preadv(handles[0], [view[position:end]], offset + position)
+        if count == 0:
+            raise EOFError('ファイルの読み込みが不足しています')
+        position += count
+    return data
 
 
 def stloader_read(handles, offset, size, target):
